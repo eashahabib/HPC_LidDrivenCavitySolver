@@ -6,7 +6,6 @@
 #include "PoissonSolver.h"
 
 
-
 class LidDrivenCavity
 {
 public:
@@ -21,7 +20,7 @@ public:
     void SetReynoldsNumber(double Re);
     
 
-    void Initialise(int n, string *n_inputs);
+    void Initialise(int n, char *n_inputs[]);
     void Integrate(int &argc, char *argv[]);
 
     // Add any other public functions
@@ -29,13 +28,12 @@ public:
     void BoundaryVorticity(int Tmycol, int Tmyrow); //Boundary Conditions for vorticity
     void InteriorVorticity();
 //    void Update(int Tmyrow, int Tmycol, double *updated);
-    void UpdateVorticity(int myrow, int mycol);
+    void UpdateVorticity(int Tmyrow, int Tmycol);
     void NewInteriorVorticity();
 //    void PoissonProblem(int mpirank, int ctx, double dx, double dy, int NBx, int NBy, int srw, int scl);
-    void UpdateStreamFunction(int myrow, int mycol);
+//    void UpdateStreamFunction(int myrow, int mycol);
 //    void BandedMatrixScaLapack(int mpirank, int srw, int scl, int smallNBx, int smallNBy, double a, double b, double c);
     void PatchUp(int Tmyrow, int Tmycol);
-    void JacobiSolver(int iter, int Tmycol, int Tmyrow);
     
 
 private:
@@ -58,32 +56,12 @@ private:
     int    mpirank;
     int    NBx; // size of blocks in a partition
     int    NBy;
+    int    srw;
+    int    scl;
     
     double* W = nullptr; // vorticity
     double* PSI = nullptr; // stream fuction
 };
-
-void LidDrivenCavity::JacobiSolver(int iter, int Tmycol, int Tmyrow){
-    double *temp = new double[(NBx-2)*(NBy-2)]();
-    double err1, err2; 
-    for(int k=0; k<iter; k++){
-    //do{
-        err1 = err2;
-        for(int i=1; i<NBx-1; i++){
-            for(int j=1; j<NBy-1; j++){
-                temp[(j-1)*(NBx-2)+(i-1)] = psi[j*NBx+i] + ((psi[j*NBx+i+1]+psi[j*NBx+i-1]-2*psi[j*NBx+i])/dx/dx + (psi[(j+1)*NBx+i]+psi[(j-1)*NBx+i]-2*psi[j*NBx+i])/dy/dy +w[j*NBx+i])/(2/dx/dx + 2/dy/dy);
-            }
-        }
-        err2 = cblas_dnrm2((NBx-2)*(NBy-2), temp, 1);
-        for(int i=1; i<NBx-1; i++){
-            for(int j=1; j<NBy-1; j++){
-                psi[j*NBx+i] = temp[(j-1)*(NBx-2)+(i-1)];
-            }
-        }
-        LidDrivenCavity::UpdateStreamFunction(Tmyrow, Tmycol);
-    }//while(abs(err2-err1)>1e-10);
-    delete[] temp;
-}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 LidDrivenCavity::LidDrivenCavity(){ // constructor
@@ -124,33 +102,49 @@ void LidDrivenCavity::SetReynoldsNumber(double re){
     Re = re;
 }
 
-void LidDrivenCavity::Initialise(int n, string *n_inputs){
+void LidDrivenCavity::Initialise(int n, char *n_inputs[]){
     for(int i=1; i<n; i=i+2){
-        if (n_inputs[i] == "--Lx" && n_inputs[i+2] == "--Ly"){
-            LidDrivenCavity::SetDomainSize( stod(n_inputs[i+1]), stod(n_inputs[i+3]) );
+        if (string(n_inputs[i]) == "--Lx" && string(n_inputs[i+2]) == "--Ly"){
+            LidDrivenCavity::SetDomainSize( atof(n_inputs[i+1]), atof(n_inputs[i+3]) );
             //cout << "done 1" << endl;
         }
-        else if(n_inputs[i] == "--Nx" && n_inputs[i+2] == "--Ny"){
-            LidDrivenCavity::SetGridSize( stoi(n_inputs[i+1]), stoi(n_inputs[i+3]) );
+        else if(string(n_inputs[i]) == "--Nx" && string(n_inputs[i+2]) == "--Ny"){
+            LidDrivenCavity::SetGridSize( atoi(n_inputs[i+1]), atoi(n_inputs[i+3]) );
             //cout << "done 2" << endl;
         }
-        else if(n_inputs[i] == "--Px" && n_inputs[i+2] == "--Py"){
-            LidDrivenCavity::SetPartitionSize( stoi(n_inputs[i+1]), stoi(n_inputs[i+3]) );
+        else if(string(n_inputs[i]) == "--Px" && string(n_inputs[i+2]) == "--Py"){
+            LidDrivenCavity::SetPartitionSize( atoi(n_inputs[i+1]), atoi(n_inputs[i+3]) );
             //cout << "done 2" << endl;
         }
-        else if(n_inputs[i] == "--dt"){
-            LidDrivenCavity::SetTimeStep(stod(n_inputs[i+1]) );
+        else if(string(n_inputs[i]) == "--dt"){
+            LidDrivenCavity::SetTimeStep(atof(n_inputs[i+1]) );
             //cout << "done 3" << endl;
         }
-        else if(n_inputs[i] == "--T"){
-            LidDrivenCavity::SetFinalTime(stod(n_inputs[i+1]) );
+        else if(string(n_inputs[i]) == "--T"){
+            LidDrivenCavity::SetFinalTime(atof(n_inputs[i+1]) );
             //cout << "done 4" << endl;
         }
-        else if(n_inputs[i] == "--Re"){
-            LidDrivenCavity::SetReynoldsNumber( stod(n_inputs[i+1]) );
+        else if(string(n_inputs[i]) == "--Re"){
+            LidDrivenCavity::SetReynoldsNumber( atof(n_inputs[i+1]) );
             //cout << "done 5" << endl;
         }
     }
+    
+    srw = Nx -2;
+    scl = Ny -2;
+    
+    //2 row and col padding to hold for BCs for each partition block
+    NBx = srw/Px+2; 
+    NBy = scl/Py+2; 
+
+    dx = Lx/(Nx-1);
+    dy = Ly/(Ny-1);
+    
+    if (dt >= Re*dx*dy/4){
+         cout << "dt " << dt << ">=" << Re*dx*dy/4 << endl;
+         cout << "dt is too big! Please enter a smaller dt. ";
+         return;
+     }
     
 }
 
@@ -164,24 +158,19 @@ void LidDrivenCavity::Integrate(int &argc, char *argv[]){
     if (retval_rank == MPI_ERR_COMM || retval_size == MPI_ERR_COMM) {
         cout << "Invalid communicator" << endl;
         return;
+    } else if(np!= Px*Py){
+        cout << "Invalid choice of processes!" << endl;
+        return;
     }
 
-    int srw = Nx -2;
-    int scl = Ny -2;
-    
-    //2 row and col padding to hold for BCs for each partition block
-    NBx = srw/Px+2; 
-    NBy = scl/Py+2; 
-
-    dx = Lx/(Nx-1);
-    dy = Ly/(Ny-1);
-
-     if (dt >= Re*dx*dy/4){
-         cout << "dt " << dt << ">=" << Re*dx*dy/4 << endl;
-         cout << "dt is too big! Please enter a smaller dt. ";
-         return;
-     }
-    
+     
+    // ... Set up CBLACS grid for Scalapack for A
+    int procrows = 1, proccols = Py*Px; // columns A will get divided into
+    int ctx, myid, myrow, mycol, numproc, ncol, nrow;
+    Cblacs_pinfo(&myid, &numproc);
+    Cblacs_get(0, 0, &ctx);
+    Cblacs_gridinit(&ctx, "Column-major", procrows, proccols);
+    Cblacs_gridinfo( ctx, &nrow, &ncol, &myrow, &mycol);
     
     // ... Set up CBLACS grid for easy division of w and psi
     int prows = Px, pcols = Py;
@@ -192,9 +181,11 @@ void LidDrivenCavity::Integrate(int &argc, char *argv[]){
     Cblacs_gridinfo(Tctx , &Tnrow, &Tncol, &Tmyrow, &Tmycol);
     
 
-    double a0 = 2*(1/dx/dx + 1/dy/dy), b1  = -1/dx/dx , c2 = -1/dy/dy;
+    double a0 = (1.0/dx/dx + 1.0/dy/dy), b1  = 1.0/dx/dx , c2 = 1.0/dy/dy;
     PoissonSolver *Sys = new PoissonSolver();
     Sys->SetDiagonal(a0, b1, c2);
+//    Sys->GenerateA_ScaLapack(mpirank, srw, scl, NBx-2, NBy-2);
+//    Sys->ScaLapackSystemSetup(ctx, NBx, NBy, srw, scl);
     
 
     //Initial Conditions
@@ -203,25 +194,26 @@ void LidDrivenCavity::Integrate(int &argc, char *argv[]){
     
     cout << "Rank: " << mpirank << " Row: " << Tmyrow << " Col: " << Tmycol << endl;
     
-    for (int nt=1; nt<T/dt+1; nt++){
+    for (int nt=1; nt<=T/dt; nt++){
 
         LidDrivenCavity::BoundaryVorticity(Tmycol, Tmyrow);
         
         LidDrivenCavity::InteriorVorticity();
 
-        LidDrivenCavity::UpdateVorticity(Tmyrow, Tmycol);
+//        LidDrivenCavity::UpdateVorticity(Tmyrow, Tmycol);
+        Update(mpirank, Tmycol, Tmyrow, NBx, NBy, Px, Py, w);
         
         LidDrivenCavity::NewInteriorVorticity();
         
-        Sys->ParallelJacobiSolver(250, Tmycol, Tmyrow, NBx, NBy, w, psi);
+        Update(mpirank, Tmycol, Tmyrow, NBx, NBy, Px, Py, w);
         
-//        LidDrivenCavity::JacobiSolver(100, Tmycol, Tmyrow);
+        Sys->ParallelJacobiSolver(1000, mpirank, Tmycol, Tmyrow, NBx, NBy, Px, Py, w, psi);
+//        Sys->SolveProblem_ScaLapack(NBx, NBy, w, psi);
         
-        LidDrivenCavity::UpdateStreamFunction(Tmyrow, Tmycol);
-        printMatrix(NBx, NBy, psi);
+//        LidDrivenCavity::UpdateStreamFunction(Tmyrow, Tmycol);
+        Update(mpirank, Tmycol, Tmyrow, NBx, NBy, Px, Py, psi);
+        
     }
-    
-    //printMatrix(NBx, NBy, w);    
     
     if(mpirank==0){
         W = new double[(Nx)*(Ny)]();
@@ -231,11 +223,16 @@ void LidDrivenCavity::Integrate(int &argc, char *argv[]){
     LidDrivenCavity::PatchUp(Tmyrow, Tmycol);
     
     if(mpirank == 0){
-//        cout << "psi" << endl;
-//        printMatrix(Nx, Ny, PSI);
+        cout << "psi" << endl;
+        printMatrix(Nx, Ny, PSI);
         LidDrivenCavity::BoundaryVorticity();
-//        cout << "w" << endl;
-//        printMatrix(Nx, Ny, W);
+        cout << "w" << endl;
+        printMatrix(Nx, Ny, W);
+        
+        Print2File(argc, argv, Nx, Ny, w, psi);
+        
+        Update(mpirank, Tmycol, Tmyrow, NBx, NBy, Px, Py, w);
+        printMatrix(NBx, NBy, w);
     }
     
 //    Cblacs_gridexit( ctx );
@@ -246,15 +243,15 @@ void LidDrivenCavity::Integrate(int &argc, char *argv[]){
 void LidDrivenCavity::BoundaryVorticity(){
     for(int i=0; i<Nx; i++){
         //top
-        W[Nx*(Ny-1)+i] = (PSI[Nx*(Ny-1)+i] - PSI[Nx*(Ny-1)+i-Nx])*2/dy/dy - 2.0*U/dy;
+        W[Nx*(Ny-1)+i] = (PSI[Nx*(Ny-1)+i] - PSI[Nx*(Ny-1)+i-Nx])*2.0/dy/dy - 2.0*U/dy;
         //bottom
-        W[i] = (PSI[i] - PSI[i+Nx])*2/dy/dy;
+        W[i] = (PSI[i] - PSI[i+Nx])*2.0/dy/dy;
     }
     for(int i=0; i<Ny; i++){
         //left
-        W[i*Nx] = (PSI[i*Nx] - PSI[i*Nx+1])*2/dx/dx;
+        W[i*Nx] = (PSI[i*Nx] - PSI[i*Nx+1])*2.0/dx/dx;
         //right
-        W[i*Nx+Nx-1] = (PSI[i*Nx+Nx-1] - PSI[i*Nx+Nx-2])*2/dx/dx;
+        W[i*Nx+Nx-1] = (PSI[i*Nx+Nx-1] - PSI[i*Nx+Nx-2])*2.0/dx/dx;
     }
     
     //printMatrix( Nx, Ny, w);
@@ -291,123 +288,9 @@ void LidDrivenCavity::BoundaryVorticity(int Tmycol, int Tmyrow){
 void LidDrivenCavity::InteriorVorticity(){
     for(int i=1; i<NBx-1; i++){
         for(int j=1; j<NBy-1; j++){
-            w[j*NBx+i] = -(psi[j*NBx+i+1] - 2*psi[j*NBx+i] + psi[j*NBx+i-1])/dx/dx - (psi[(j+1)*NBx+i] - 2*psi[j*NBx+i] + psi[(j-1)*NBx+i])/dy/dy;
+            w[j*NBx+i] = -(psi[j*NBx+i+1] - 2.0*psi[j*NBx+i] + psi[j*NBx+i-1])/dx/dx - (psi[(j+1)*NBx+i] - 2.0*psi[j*NBx+i] + psi[(j-1)*NBx+i])/dy/dy;
         }
     }
-}
-
-void LidDrivenCavity::UpdateVorticity(int Tmyrow, int Tmycol){
-    double *top = new double[NBx-2];
-    double *bot = new double[NBx-2];
-    double *left = new double[NBy-2];
-    double *right = new double[NBy-2];
-    
-    if(Tmycol != Py-1 && Tmycol != 0){ //not a top or bottom
-        for(int i=1; i<NBx-1; i++){
-            top[i-1] = w[(NBy-2)*NBx+i];
-            bot[i-1] = w[1*NBx+i];
-        }
-        
-        MPI_Send(top, NBx-2, MPI_DOUBLE, mpirank+Px, 1, MPI_COMM_WORLD);
-        MPI_Send(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 2, MPI_COMM_WORLD);
-        
-    }else if(Tmycol == Py-1){// its a top
-        
-        for(int i=1; i<NBx-1; i++){
-            bot[i-1] = w[1*NBx+i];
-        }
-        
-        MPI_Send(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 2, MPI_COMM_WORLD);
-        
-    }else if(Tmycol == 0){ // its a bottom
-        
-        for(int i=1; i<NBx-1; i++){
-            top[i-1] = w[(NBy-2)*NBx+i];
-        }
-        
-        MPI_Send(top, NBx-2, MPI_DOUBLE, mpirank+Px, 1, MPI_COMM_WORLD);
-        
-    }
-    
-    if(Tmyrow != Px-1 && Tmyrow != 0){ //middle
-        
-        for(int j=1; j<NBy-1; j++){
-            left[j-1] = w[j*NBx+1];
-            right[j-1] = w[j*NBx+(NBx-2)];
-        }
-        
-        MPI_Send(left, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD);
-        MPI_Send(right, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD);
-        
-    }else if(Tmyrow == Px-1){// its a right
-        
-        for(int j=1; j<NBy-1; j++){
-            right[j-1] = w[j*NBx+(NBx-2)];
-        }
-        
-        MPI_Send(right, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD);
-        
-    }else if(Tmyrow == 0){ // its a left
-        
-        for(int j=1; j<NBy-1; j++){
-            left[j-1] = w[j*NBx+1];
-        }
-        
-        MPI_Send(left, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD);
-        
-    }
-    //////////////////////////////////////////////////////////////////
-    if(Tmycol != Py-1 && Tmycol != 0){ //not a top or bottom
-        
-        MPI_Recv(top, NBx-2, MPI_DOUBLE, mpirank+Px, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int i=1; i<NBx-1; i++){
-            w[(NBy-1)*NBx+i] = top[i-1];
-            w[0*NBx+i] = bot[i-1];
-        }
-    }else if(Tmycol == Py-1){// its a top
-        
-        MPI_Recv(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int i=1; i<NBx-1; i++){
-            w[0*NBx+i] = bot[i-1];
-        }
-    }else if(Tmycol == 0){ // its a bottom
-        
-        MPI_Recv(top, NBx-2, MPI_DOUBLE, mpirank+Px, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int i=1; i<NBx-1; i++){
-            w[(NBy-1)*NBx+i] = top[i-1];
-        }
-    }
-    ///////////////////////////////////////////////////////////////////
-    
-    if(Tmyrow != Px-1 && Tmyrow != 0){ //middle
-        
-        MPI_Recv(left, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(right, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int j=1; j<NBy-1; j++){
-            w[j*NBx+0] = left[j-1];
-            w[j*NBx+(NBx-1)] = right[j-1];
-        }
-    }else if(Tmyrow == Px-1){// its a right
-        
-        MPI_Recv(right, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int j=1; j<NBy-1; j++){
-            w[j*NBx+(NBx-1)] = right[j-1];
-        }
-    }else if(Tmyrow == 0){ // its a left
-        
-        MPI_Recv(left, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int j=1; j<NBy-1; j++){
-            w[j*NBx+0] = left[j-1];
-        }
-    }
-    
 }
 
 void LidDrivenCavity::NewInteriorVorticity(){
@@ -420,136 +303,22 @@ void LidDrivenCavity::NewInteriorVorticity(){
     
     for(int i=1; i<NBx-1; i++){
         for(int j=1; j<NBy-1; j++){
-            t0[(j-1)*(NBx-2)+(i-1)] = ( (w[j*NBx+i+1] - 2*w[j*NBx+i] + w[j*NBx+i-1])/dx/dx + (w[(j+1)*NBx+i] - 2*w[j*NBx+i] + w[(j-1)*NBx+i])/dy/dy )/Re;
-            t1[(j-1)*(NBx-2)+(i-1)] = (psi[(j+1)*NBx+i] - psi[(j-1)*NBx+i])/2/dy;
-            t2[(j-1)*(NBx-2)+(i-1)] = (w[j*NBx+i+1] - w[j*NBx+i-1])/2/dx;
-            t3[(j-1)*(NBx-2)+(i-1)] = (psi[j*NBx+i+1] - psi[j*NBx+i-1])/2/dx;
-            t4[(j-1)*(NBx-2)+(i-1)] = (w[(j+1)*NBx+i] - w[(j-1)*NBx+i])/2/dy;
+            t0[(j-1)*(NBx-2)+(i-1)] = ( (w[j*NBx+i+1] - 2.0*w[j*NBx+i] + w[j*NBx+i-1])/dx/dx + (w[(j+1)*NBx+i] - 2.0*w[j*NBx+i] + w[(j-1)*NBx+i])/dy/dy )/Re;
+            t1[(j-1)*(NBx-2)+(i-1)] = (psi[(j+1)*NBx+i] - psi[(j-1)*NBx+i])/2.0/dy;
+            t2[(j-1)*(NBx-2)+(i-1)] = (w[j*NBx+i+1] - w[j*NBx+i-1])/2.0/dx;
+            t3[(j-1)*(NBx-2)+(i-1)] = (psi[j*NBx+i+1] - psi[j*NBx+i-1])/2.0/dx;
+            t4[(j-1)*(NBx-2)+(i-1)] = (w[(j+1)*NBx+i] - w[(j-1)*NBx+i])/2.0/dy;
         }
     }
     //appending inside the same loop resulted in incorrect results
     for(int i=1; i<NBx-1; i++){
         for(int j=1; j<NBy-1; j++){
             w[j*NBx+i] += (t0[(j-1)*(NBx-2)+(i-1)] - t1[(j-1)*(NBx-2)+(i-1)]*t2[(j-1)*(NBx-2)+(i-1)] + t3[(j-1)*(NBx-2)+(i-1)]*t4[(j-1)*(NBx-2)+(i-1)])*dt;
-            
         }
     }
 //    cout << "w" << endl;
 //    printMatrix( Nx, Ny, w);
-//    delete[] t0, t1, t2, t3, t4;
-}
-
-void LidDrivenCavity::UpdateStreamFunction(int Tmyrow, int Tmycol){
-    double *top = new double[NBx-2];
-    double *bot = new double[NBx-2];
-    double *left = new double[NBy-2];
-    double *right = new double[NBy-2];
-    
-    if(Tmycol != Py-1 && Tmycol != 0){ //not a top or bottom
-        for(int i=1; i<NBx-1; i++){
-            top[i-1] = psi[(NBy-2)*NBx+i];
-            bot[i-1] = psi[1*NBx+i];
-        }
-        
-        MPI_Send(top, NBx-2, MPI_DOUBLE, mpirank+Px, 1, MPI_COMM_WORLD);
-        MPI_Send(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 2, MPI_COMM_WORLD);
-        
-    }else if(Tmycol == Py-1){// its a top
-        
-        for(int i=1; i<NBx-1; i++){
-            bot[i-1] = psi[1*NBx+i];
-        }
-        
-        MPI_Send(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 2, MPI_COMM_WORLD);
-        
-    }else if(Tmycol == 0){ // its a bottom
-        
-        for(int i=1; i<NBx-1; i++){
-            top[i-1] = psi[(NBy-2)*NBx+i];
-        }
-        
-        MPI_Send(top, NBx-2, MPI_DOUBLE, mpirank+Px, 1, MPI_COMM_WORLD);
-        
-    }
-    
-    if(Tmyrow != Px-1 && Tmyrow != 0){ //middle
-        
-        for(int j=1; j<NBy-1; j++){
-            left[j-1] = psi[j*NBx+1];
-            right[j-1] = psi[j*NBx+(NBx-2)];
-        }
-        
-        MPI_Send(left, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD);
-        MPI_Send(right, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD);
-        
-    }else if(Tmyrow == Px-1){// its a right
-        
-        for(int j=1; j<NBy-1; j++){
-            right[j-1] = psi[j*NBx+(NBx-2)];
-        }
-        
-        MPI_Send(right, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD);
-        
-    }else if(Tmyrow == 0){ // its a left
-        
-        for(int j=1; j<NBy-1; j++){
-            left[j-1] = psi[j*NBx+1];
-        }
-        
-        MPI_Send(left, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD);
-        
-    }
-    //////////////////////////////////////////////////////////////////
-    if(Tmycol != Py-1 && Tmycol != 0){ //not a top or bottom
-        
-        MPI_Recv(top, NBx-2, MPI_DOUBLE, mpirank+Px, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int i=1; i<NBx-1; i++){
-            psi[(NBy-1)*NBx+i] = top[i-1];
-            psi[0*NBx+i] = bot[i-1];
-        }
-    }else if(Tmycol == Py-1){// its a top
-        
-        MPI_Recv(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int i=1; i<NBx-1; i++){
-            psi[0*NBx+i] = bot[i-1];
-        }
-    }else if(Tmycol == 0){ // its a bottom
-        
-        MPI_Recv(top, NBx-2, MPI_DOUBLE, mpirank+Px, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int i=1; i<NBx-1; i++){
-            psi[(NBy-1)*NBx+i] = top[i-1];
-        }
-    }
-    ///////////////////////////////////////////////////////////////////
-    
-    if(Tmyrow != Px-1 && Tmyrow != 0){ //middle
-        
-        MPI_Recv(left, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(right, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int j=1; j<NBy-1; j++){
-            psi[j*NBx+0] = left[j-1];
-            psi[j*NBx+(NBx-1)] = right[j-1];
-        }
-    }else if(Tmyrow == Px-1){// its a right
-        
-        MPI_Recv(right, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int j=1; j<NBy-1; j++){
-            psi[j*NBx+(NBx-1)] = right[j-1];
-        }
-    }else if(Tmyrow == 0){ // its a left
-        
-        MPI_Recv(left, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        for(int j=1; j<NBy-1; j++){
-            psi[j*NBx+0] = left[j-1];
-        }
-    }
+    delete[] t0, t1, t2, t3, t4;
 }
 
 void LidDrivenCavity::PatchUp(int Tmyrow, int Tmycol){
@@ -572,17 +341,23 @@ void LidDrivenCavity::PatchUp(int Tmyrow, int Tmycol){
         }
     }
     
-    
-    MPI_Gather(w_rel, Psize, MPI_DOUBLE, W_in, Psize, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Gather(psi_rel, Psize, MPI_DOUBLE, PSI_in, Psize, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(w_rel, Psize, MPI_DOUBLE, &W_in[mpirank*Psize], Psize, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(psi_rel, Psize, MPI_DOUBLE, &PSI_in[mpirank*Psize], Psize, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     
     if(mpirank == 0){
-        for(int i=1; i<NBx-1; i++){
-            for(int j=1; j<NBy-1; j++){
-                W[j*NBx+i] = W_in[(j-1)*(NBx-2)+i-1];
-                PSI[j*NBx+i] = PSI_in[(j-1)*(NBx-2)+i-1];
+        int ind;
+        for(int r=0; r<Px*Py ; r++){
+            for(int i=0; i<NBx-2; i++){
+                for(int j=0; j<NBy-2; j++){
+                    ind = (j+1+ floor(r/Px) *(NBy-2))*Nx+(i+1)+ r%Px *(NBx-2);
+//                    cout << "row" << r%Px << endl;
+//                    cout << "col" << floor(r/Px) << endl;
+                    W[ind] = W_in[j*(NBx-2)+i +mpirank*Psize];
+                    PSI[ind] = PSI_in[j*(NBx-2)+i +mpirank*Psize];
+                }
             }
         }
     }
-    
+    delete [] w_rel, psi_rel;
 }
+
