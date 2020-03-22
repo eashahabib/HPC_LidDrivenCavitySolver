@@ -2,9 +2,11 @@
 #define FUNCTIONS_H
 
 #pragma once
-#include <string>
+#include <cmath>
 using namespace std;
 #include <iostream>
+#include <fstream>
+#include <stdlib.h> //for atof
 
 // This provides forward-declarations of the C++ iostream classes since
 // we do not need the full definition in the header file.
@@ -39,23 +41,31 @@ extern "C" {
                         int* INFO);
     
     /* Cblacs declarations */
-    // Initialises the BLACS world communicator (calls MPI_Init if needed)
-    void Cblacs_pinfo(int*, int*);
-    // Get the default system context (i.e. MPI_COMM_WORLD)
-    void Cblacs_get(int, int, int*);
-    // Initialise a process grid of 1 rows and npe columns
-    void Cblacs_gridinit(int*, const char*, int, int);
-    // Frees the context handle we created with Cblacs_get()
-    void Cblacs_gridexit(int);
+    void Cblacs_pinfo(int*, int*); // Initialises the BLACS world communicator (calls MPI_Init if needed)
+    void Cblacs_get(int, int, int*);  // Get the default system context (i.e. MPI_COMM_WORLD)
+    void Cblacs_gridinit(int*, const char*, int, int); // Initialise a process grid of npr rows and npe columns
+    void Cblacs_gridexit(int); // Frees the context handle we created with Cblacs_get()
     void Cblacs_exit(int);
     void Cblacs_barrier(int, const char*);
-    // Get info about the grid to verify it is set up
-    void Cblacs_gridinfo(int ctx, int *nrow, int *ncol, int *myrow, int *mycol);
+    void Cblacs_gridinfo(int ctx, int *nrow, int *ncol, int *myrow, int *mycol); // Get info about the grid to verify it is set up
+    
+    int numroc_(int*, int*, int*, int*, int*);
     
     /* Scalapack declarations */
     void F77NAME(pdgbsv)(const int &N, const int &BWL, const int &BWU, const int &NRHS, 
                         double *A, const int &JA, 
                         int *desca, int *ipiv, double *x, const int &IB, int *descb, 
+                        double *work, const int &LW, int *info);
+                        
+    void F77NAME(pdgbtrf)(const int &N, const int &BWL, const int &BWU, 
+                        double *A, const int &JA, 
+                        int *desca, int *ipiv, double *af, const int &laf,
+                        double *work, const int &LW, int *info);
+    
+    void F77NAME(pdgbtrs)(const char, const int &N, const int &BWL, const int &BWU, const int &NRHS, 
+                        double *A, const int &JA, 
+                        int *desca, int *ipiv, double *x, const int &IB, int *descb, 
+                        double *af, const int &laf,
                         double *work, const int &LW, int *info);
 }
 
@@ -63,19 +73,18 @@ extern "C" {
 
 void printMatrix(int row, int col, double* A);
 void printMatrix(int row, int col, int* A);
-void BandedMatrixLapackLU(int srw, int scl, double a, double b, double c, double *A, int *ipiv);
-void BoundaryVorticity(int Nx, int Ny, double dx, double dy, double U, double *psi, double *w);
-void InteriorVorticity(int Nx, int Ny, double dx, double dy, double *psi, double *w);
-void NewInteriorVorticity(double Re, int Nx, int Ny, double dx, double dy, double dt, double *psi, double *w);
-void PoissonProblem(int Nx, int Ny, int srw, int scl, double *A, double *w, double *psi, int *ipiv);
+void Print2File(int argc, char *argv[], int Nx, int Ny, double *w, double *psi);
+void Update(int mpirank, int Tmycol, int Tmyrow, int NBx, int NBy, int Px, int Py, double *w);
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void printMatrix(int row, int col, double* A) {
     cout << endl;
 	for (int i = 0; i < row; i++) {
 		for (int j = 0; j < col; j++) {
-            cout.width(6);
+            cout.width(10);
+            cout.precision(5);
+            //cout.fill(' ');
 			cout << A[i+j*row] << "  ";
 		}
 		cout << endl;
@@ -87,7 +96,7 @@ void printMatrix(int row, int col, int* A) {
     cout << endl;
 	for (int i = 0; i < row; i++) {
 		for (int j = 0; j < col; j++) {
-            cout.width(6);
+            cout.width(5);
 			cout << A[i+j*row] << "  ";
 		}
 		cout << endl;
@@ -95,121 +104,150 @@ void printMatrix(int row, int col, int* A) {
 cout << "-----------------------------" << endl;
 }
 
-void BandedMatrixLapackLU(int srw, int scl, double a, double b, double c, double *A, int *ipiv){
-    int col = 2*scl+1+scl; 
-    int i;
-    for(i=0; i<srw*scl; i++){
-        A[i*col + 0+scl] = c;
-        A[i*col + scl-1+scl] = b;
-        A[i*col + scl+scl] = a;
-        A[i*col + scl+1+scl] = b;
-        A[i*col + 2*scl+scl] = c;
-    }
-    
-    for(int i=0; i<srw*scl-(scl-1); i=i+scl){
-        A[(i)*col + scl-1 +scl] = 0;
-        A[(i+scl-1)*col + scl+1 +scl] = 0;
-    }
-    printMatrix( (2*srw+1+srw),srw*scl, A);
-    
-    int nsv = srw*scl;
-    int ldh = 3*srw+1;
-    int info;
-    
-    F77NAME(dgbtrf)(nsv, nsv, srw, srw, A, ldh, ipiv, &info);
-
-    if (info) {
-        cout << "Failed to LU factorise matrix" << endl;
-    }
-}
-
-//Boundary Conditions for vorticity
-void BoundaryVorticity(int Nx, int Ny, double dx, double dy, double U, double *psi, double *w){
-    int i;
-    for(i=0; i<Nx; i++){
-        //top
-        w[Nx*(Ny-1)+i] = (psi[Nx*(Ny-1)+i] - psi[Nx*(Ny-1)+i-Nx])*2/dy/dy - 2.0*U/dy;
-        //bottom
-        w[i] = (psi[i] - psi[i+Nx])*2/dy/dy;
-    }
-    for(i=0; i<Ny; i++){
-        //left
-        w[i*Nx] = (psi[i*Nx] - psi[i*Nx+1])*2/dx/dx;
-        //right
-        w[i*Nx+Nx-1] = (psi[i*Nx+Nx-1] - psi[i*Nx+Nx-2])*2/dx/dx;
-    }
-    
-    //printMatrix( Nx, Ny, w);
-}
-
-void InteriorVorticity(int Nx, int Ny, double dx, double dy, double *psi, double *w){
-    for(int i=1; i<Nx-1; i++){
-        for(int j=1; j<Ny-1; j++){
-            w[j*Nx+i] = -(psi[j*Nx+i+1] - 2*psi[j*Nx+i] + psi[j*Nx+i-1])/dx/dx - (psi[(j+1)*Nx+i] - 2*psi[j*Nx+i] + psi[(j-1)*Nx+i])/dy/dy;
-            //cout<<w[j*Nx+i]<<endl;
+void Print2File(int argc, char *argv[], int Nx, int Ny, double *w, double *psi){
+    ofstream vfile("Data_LidDrivenCavity.txt" ,ios::trunc | ios::in);
+    if(vfile.good()){
+        for(int i=1; i<argc; i++){
+            vfile << argv[i] << " ";
         }
-    }
-    //printMatrix( Nx, Ny, w);
-}
-
-void NewInteriorVorticity(double Re, int Nx, int Ny, double dx, double dy, double dt, double *psi, double *w){
-    //pringles.
-    double t0, t1, t2, t3, t4;
-    for(int i=1; i<Nx-1; i++){
-        for(int j=1; j<Ny-1; j++){
-            
-            t0 = ( (w[j*Nx+i+1] - 2*w[j*Nx+i] + w[j*Nx+i-1])/dx/dx + (w[(j+1)*Nx+i] - 2*w[j*Nx+i] + w[(j-1)*Nx+i])/dy/dy )/Re;
-            t1 = (psi[(j+1)*Nx+i] - psi[(j-1)*Nx+i])/2/dy;
-            t2 = (w[j*Nx+i+1] - w[j*Nx+i-1])/2/dx;
-            t3 = (psi[j*Nx+i+1] - psi[j*Nx+i-1])/2/dx;
-            t4 = (w[(j+1)*Nx+i] - w[(j-1)*Nx+i])/2/dy;
-            w[j*Nx+i] += (t0 - t1*t2 + t3*t4)*dt;
+        vfile << endl;
+        
+        for(int i=0;i<Nx;i++){
+            for(int j=0; j<Ny; j++){
+                vfile.width(20);
+                vfile.precision(15);
+                vfile << w[i*Ny+j] <<" "<< psi[i*Ny+j] << endl; // outputting into the file
+            }
             
         }
+        vfile.close();
     }
-    cout << "w" << endl;
-    printMatrix( Nx, Ny, w);
+    else{
+        cout << "Failed to open"<<endl;
+    }
 }
 
-void PoissonProblem(int Nx, int Ny, int srw, int scl, double *A, double *w, double *psi, int *ipiv){
-//solving a system A u = f
-    double *f = new double[srw*scl];
-    for(int i=1; i<Nx-1; i++){
-        for(int j=1; j<Ny-1; j++){
-            f[(j-1)*srw+(i-1)] = w[j*Nx+i];
+void Update(int mpirank, int Tmycol, int Tmyrow, int NBx, int NBy, int Px, int Py, double *w){
+    double *top = new double[NBx-2];
+    double *bot = new double[NBx-2];
+    double *left = new double[NBy-2];
+    double *right = new double[NBy-2];
+    
+    if(Py != 1){
+        if(Tmycol != Py-1 && Tmycol != 0){ // Middle column
+            for(int i=1; i<NBx-1; i++){
+                top[i-1] = w[(NBy-2)*NBx+i];
+                bot[i-1] = w[1*NBx+i];
+            }
+            
+            MPI_Send(top, NBx-2, MPI_DOUBLE, mpirank+Px, 1, MPI_COMM_WORLD);
+            MPI_Send(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 2, MPI_COMM_WORLD);
+            
+        }else if(Tmycol == Py-1){// Left column (Top)
+        
+            for(int i=1; i<NBx-1; i++){
+                bot[i-1] = w[1*NBx+i];
+            }
+            
+            MPI_Send(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 2, MPI_COMM_WORLD);
+            
+        }else if(Tmycol == 0){ // Right Column (Bottom)
+            
+            for(int i=1; i<NBx-1; i++){
+                top[i-1] = w[(NBy-2)*NBx+i];
+            }
+            
+            MPI_Send(top, NBx-2, MPI_DOUBLE, mpirank+Px, 1, MPI_COMM_WORLD);
+        }
+        
+        if(Tmycol != Py-1 && Tmycol != 0){ // Middle column
+        
+            MPI_Recv(top, NBx-2, MPI_DOUBLE, mpirank+Px, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Recv(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            for(int i=1; i<NBx-1; i++){
+                w[(NBy-1)*NBx+i] = top[i-1];
+                w[0*NBx+i] = bot[i-1];
+            }
+        }else if(Tmycol == Py-1){// Left column (Top)
+            
+            MPI_Recv(bot, NBx-2, MPI_DOUBLE, mpirank-Px, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            for(int i=1; i<NBx-1; i++){
+                w[0*NBx+i] = bot[i-1];
+            }
+        }else if(Tmycol == 0){ // Right Column (Bottom)
+            
+            MPI_Recv(top, NBx-2, MPI_DOUBLE, mpirank+Px, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            for(int i=1; i<NBx-1; i++){
+                w[(NBy-1)*NBx+i] = top[i-1];
+            }
         }
     }
     
-//    cout << "f" << endl;
-//    printMatrix(srw, scl, f);
-    
-    int nsv = srw*scl;
-    int kl = srw;         // Number of lower diagonals
-    int ku = srw;         // Number of upper diagonals
-    int nrhs = 1;
-    int lda = 3*srw+1;
-    //int ldb = nsv;
-    int info;
-    
-//    cout << "A" << endl;
-    //printMatrix( lda,nsv,  A);
-    
-    F77NAME(dgbtrs)('N', nsv, kl , ku, nrhs, A, lda, ipiv, f, nsv, &info);
-    if (info) {
-        cout << "Error in solve: " << info << endl;
-    }
-    
-    
-    
-    for(int i=1; i<Nx-1; i++){
-        for(int j=1; j<Ny-1; j++){
-            //cout << f[(j-1)*Nx+(i-1)] << endl; 
-            psi[j*Nx+i] = f[(j-1)*srw+(i-1)];
+    if(Px != 1){
+        if(Tmyrow != Px-1 && Tmyrow != 0){ // Middle row
+        
+            for(int j=1; j<NBy-1; j++){
+                left[j-1] = w[j*NBx+1];
+                right[j-1] = w[j*NBx+(NBx-2)];
+            }
+            
+            MPI_Send(left, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD);
+            MPI_Send(right, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD);
+            
+        }else if(Tmyrow == Px-1){// Bottom row (Right)
+            
+            for(int j=1; j<NBy-1; j++){
+                right[j-1] = w[j*NBx+(NBx-2)];
+            }
+            
+            MPI_Send(right, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD);
+            
+        }else if(Tmyrow == 0){
+            
+            for(int j=1; j<NBy-1; j++){
+                left[j-1] = w[j*NBx+1];
+            }
+            
+            MPI_Send(left, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD);
+        }
+        
+        if(Tmyrow != Px-1 && Tmyrow != 0){ // Middle row
+        
+            MPI_Recv(left, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Recv(right, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            for(int j=1; j<NBy-1; j++){
+                w[j*NBx+0] = right[j-1];
+                w[j*NBx+(NBx-1)] = left[j-1];
+            }
+        }else if(Tmyrow == Px-1){// Bottom row (Right)
+            
+            MPI_Recv(right, NBy-2, MPI_DOUBLE, mpirank-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            for(int j=1; j<NBy-1; j++){
+                w[j*NBx+0] = right[j-1];
+            }
+        }else if(Tmyrow == 0){  // Top Row (Left)
+            
+            MPI_Recv(left, NBy-2, MPI_DOUBLE, mpirank+1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            for(int j=1; j<NBy-1; j++){
+                w[j*NBx+(NBx-1)] = left[j-1];
+            }
         }
     }
-//    cout << "psi" << endl;
-    printMatrix(Nx, Ny, psi);
-    delete f;
+    
+//    if(Py != 1){
+//        
+//    }
+        
+//    if(Px != 1){
+//        
+//    }
 }
+
 
 #endif // COMPLEX_H
