@@ -17,9 +17,11 @@ public:
     void GenerateA_LapackLU(int srw, int scl); // generate the diagonal matrix in banded format with LU factorisation
     void SolveProblem_LU(int Nx, int Ny, int srw, int scl, double *w, double *psi); //solves the poisson problem with LU matrix from GenerateA_LU()
     
-    void GenerateA_ScaLapack(int mpirank, int srw, int scl, int smallNBx, int smallNBy); // generate the diagonal matrix in banded format
-    void ScaLapackSystemSetup(int ctx, int NBx, int NBy, int srw, int scl);
-    void SolveProblem_ScaLapack(int NBx, int NBy, double *w, double *psi);
+    void GenerateA_ScaLapack(int mpirank, int srw, int scl, int smallNBx, int smallNBy); // generate the diagonal matrix in banded format for Scalapack
+    void ScaLapackSystemSetup(int ctx, int NBx, int NBy, int srw, int scl); // set up system and perform LU
+    void SolveProblem_ScaLapack(int NBx, int NBy, double *w, double *psi); // Solve system using scalapack
+    
+    void ParallelJacobiSolver(int iter, int mpirank, int Tmycol, int Tmyrow, int NBx, int NBy, int Px, int Py, double *w, double *psi);
     
 private: 
     double d0; //center diagonal value
@@ -52,13 +54,15 @@ PoissonSolver::PoissonSolver(){
 }
 
 PoissonSolver::~PoissonSolver(){
-//    delete[] ipiv, A;
+    delete[] A, ipiv, ipivot, work, af;
+    free(desca);
+    free(descb);
 }
 
 void PoissonSolver::SetDiagonal(double D0, double D1, double D2){
-    d0 = D0;
-    d1 = D1;
-    d2 = D2;
+    d0 =  2.0*D0;
+    d1 = -1.0*D1;
+    d2 = -1.0*D2;
 }
 
 void PoissonSolver::GenerateA_LapackLU(int srw, int scl){
@@ -140,12 +144,10 @@ void PoissonSolver::GenerateA_ScaLapack(int mpirank, int srw, int scl, int small
     }
     
     int j = 0;
-    for(int i=row-(mpirank*row)%srw; i<row - (srw-1); i=i+srw){
+    for(int i=(mpirank*row)%srw; i<row - (srw-1); i=i+srw){
         A[(i)*col + srw-1 +srw+srw] = 0;
         A[(i+srw-1)*col + srw+1 +srw+srw] = 0;
     }
-    
-    ipiv = new int[smallNBx*smallNBy]();
 }
 
 void PoissonSolver::ScaLapackSystemSetup(int ctx, int NBx, int NBy, int srw, int scl){
@@ -158,7 +160,7 @@ void PoissonSolver::ScaLapackSystemSetup(int ctx, int NBx, int NBy, int srw, int
     IB = 1; // Start offset in RHS vector (to use just a subvector)
     LA = (1 + 2*BWL + 2*BWU)*NB;
     LW = (NB+BWU)*(BWL+BWU)+6*(BWL+BWU)*(BWL+2*BWU) + max(NRHS*(NB+2*BWL+4*BWU), 1); // ScaLAPACK documentation
-    LAF = (NB+BWU)*(BWL+BWU)+6*(BWL+BWU)*(BWL+2*BWU);
+//    LAF = ( (NB+BWU)*(BWL+BWU)+6*(BWL+BWU)*(BWL+2*BWU) );
     
 //    int desca[7];// Descriptor for banded matrix
     desca[0] = 501; // Type
@@ -177,16 +179,17 @@ void PoissonSolver::ScaLapackSystemSetup(int ctx, int NBx, int NBy, int srw, int
     descb[5] = NB; // Local leading dim
     descb[6] = 0; // Reserved
     
-    work = new double[LW](); // Workspace
-    af = new double[LAF]();
-    ipivot = new int[NB](); // Pivoting array
-    int info;
+    work = new double[LW]();  //Workspace
+    ipivot = new int[NB]();  //Pivoting array
+//    af = new double[LAF]();
+//    int info;
     
-    F77NAME(pdgbtrf)(N, BWL, BWU, A, JA, desca, ipivot, af, LAF, work, LW, &info);
+//    F77NAME(pdgbtrf)(N, BWL, BWU, A, JA, desca, ipivot, af, LAF, work, LW, &info);
+//    
+//    if (info) {
+//        cout << "Error occurred in PDGBTRF: " << info << endl;
+//    }
     
-    if (info) {
-        cout << "Error occurred in PDGBTRF: " << info << endl;
-    }
 }
 
 void PoissonSolver::SolveProblem_ScaLapack(int NBx, int NBy, double *w, double *psi){
@@ -202,14 +205,18 @@ void PoissonSolver::SolveProblem_ScaLapack(int NBx, int NBy, double *w, double *
         }
     }
     
-//    double* B = new double[LA]();    
-//    memcpy(B, A, LA*sizeof(double));
-
+    double* B = new double[LA]();    
+    memcpy(B, A, LA*sizeof(double));
+//    
+//    work = new double[LW](); // Workspace
+//    ipivot = new int[NB](); // Pivoting array
+    
 //    printMatrix((1 + 2*BWL + 2*BWU),NB, A);
+//    printMatrix((1 + 2*BWL + 2*BWU),NB, B);
     
     //Perform the parallel solve.
-//    F77NAME(pdgbsv)(N, BWL, BWU, NRHS, B, JA, desca, ipivot, x, IB, descb, work, LW, &info);
-    F77NAME(pdgbtrs)('N', N, BWL, BWU, NRHS, A, JA, desca, ipivot, x, IB, descb, af, LAF, work, LW, &info);
+    F77NAME(pdgbsv)(N, BWL, BWU, NRHS, B, JA, desca, ipivot, x, IB, descb, work, LW, &info);
+//    F77NAME(pdgbtrs)('N', N, BWL, BWU, NRHS, B, JA, desca, ipivot, x, IB, descb, af, LAF, work, LW, &info);
     // Verify it completed successfully.
     if (info) {
         cout << "Error occurred in PDGBSV: " << info << endl;
@@ -220,7 +227,29 @@ void PoissonSolver::SolveProblem_ScaLapack(int NBx, int NBy, double *w, double *
             psi[j*NBx+i] = x[(j-1)*(NBx-2)+(i-1)];
         }
     }
-    delete[] work, x, ipivot;
+    
     
 }
+
+void PoissonSolver::ParallelJacobiSolver(int iter, int mpirank, int Tmycol, int Tmyrow, int NBx, int NBy, int Px, int Py, double *w, double *psi){
+    double *temp = new double[(NBx-2)*(NBy-2)]();
+//    double err1, err2; 
+    for(int k=0; k<iter; k++){//do{
+//        err1 = err2;
+        for(int i=1; i<NBx-1; i++){
+            for(int j=1; j<NBy-1; j++){
+                temp[(j-1)*(NBx-2)+(i-1)] = psi[j*NBx+i] + ( -(psi[j*NBx+i+1]+psi[j*NBx+i-1]-2*psi[j*NBx+i])*d1 - (psi[(j+1)*NBx+i]+psi[(j-1)*NBx+i]-2*psi[j*NBx+i])*d2 +w[j*NBx+i])/d0;
+            }
+        }
+//        err2 = cblas_dnrm2((NBx-2)*(NBy-2), temp, 1);
+        for(int i=1; i<NBx-1; i++){
+            for(int j=1; j<NBy-1; j++){
+                psi[j*NBx+i] = temp[(j-1)*(NBx-2)+(i-1)];
+            }
+        }
+        Update(mpirank, Tmycol, Tmyrow, NBx, NBy, Px, Py, psi);
+    }//while(abs(err2-err1)>1e-10);
+    delete[] temp;
+}
+
 #endif
