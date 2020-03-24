@@ -3,7 +3,8 @@ using namespace std;
 
 //#include "LidDrivenCavity.h" //Serial
 //#include "LidDrivenCavityP.h" //Scalapack
-#include "LidDrivenCavityJacobi.h" //Jacobi
+#include "LidDrivenCavity.cpp" //Jacobi
+#include "PoissonSolver.cpp"
 
 int main(int argc, char *argv[]){
     // Command line input
@@ -15,21 +16,14 @@ int main(int argc, char *argv[]){
                             "--Re", "100.0"};
     
     
-    //ALL IS SUPPOSED TO BE COL MAJOR BUT I AM DUMB SO CHECK ON MISELV PLIS
-    
-    // Create a new instance of the LidDrivenCavity class
+    // A new instance of the LidDrivenCavity class
     LidDrivenCavity* solver = new LidDrivenCavity();
     
-    // Configure the solver here...
-    // ...
-    
-//    solver->Initialise(n, n_input);
+    // Initialise the solver using the inputs
     solver->Initialise(argc, argv);
 
     // Run the solver
     solver->Integrate(argc, argv);
-    
-    //delete
 
 	return 0;
 }
